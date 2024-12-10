@@ -52,40 +52,54 @@ def test_rapdhg_with_vmap():
     var, prob = LpProblem.fromMPS("tests/lp_instances/gen-ip054.mps")
     c, integrality, constraints, bounds = convert_all(prob)
     c = jnp.array(c)
-    A = BCOO.fromdense(constraints.A)
-    l = jnp.array(constraints.lb)
-    u = jnp.array(constraints.ub)
+    constraint_lb = jnp.array(constraints.lb)
+    constraint_ub = jnp.array(constraints.ub)
+
+    eq_mask = constraint_lb == constraint_ub
+    leq_mask = constraint_lb == -jnp.inf
+    geq_mask = constraint_ub == jnp.inf
+    A = BCOO.fromdense(constraints.A[eq_mask])
+    b = jnp.array(constraint_lb[eq_mask])
+
+    leq_G = -constraints.A[leq_mask]
+    leq_rhs = -constraint_ub[leq_mask]
+    geq_G = constraints.A[geq_mask]
+    geq_rhs = constraint_lb[geq_mask]
+    G = BCOO.fromdense(jnp.concatenate([leq_G, geq_G], axis=0))
+    h = jnp.concatenate([leq_rhs, geq_rhs], axis=0)
     var_lb = jnp.array(bounds.lb)
     var_ub = jnp.array(bounds.ub)
 
-    solver = raPDHG(eps_abs=1e-6, eps_rel=1e-6)
+    solver = raPDHG(eps_abs=1e-6, eps_rel=1e-6, verbose=False)
     jit_optimize = jit(solver.optimize)
 
     def solve_single(c):
-        boxed_lp = create_lp(c, A, l, u, var_lb, var_ub)
-        # result = solver.optimize(boxed_lp)
-        result = jit_optimize(boxed_lp)
-        return (
-            jnp.dot(boxed_lp.objective_vector, result.primal_solution)
-            + boxed_lp.objective_constant
-        )
+        boxed_lp = create_lp(c, A, b, G, h, var_lb, var_ub)
+        # boxed_lp = create_lp(c, A, l, u, var_lb, var_ub)
+        result = solver.optimize(boxed_lp)
+        # result = jit_optimize(boxed_lp)
+        return jnp.dot(boxed_lp.objective_vector, result.primal_solution) + boxed_lp.objective_constant
+    jit_solve_single = jit(solve_single)
 
     start_time = timeit.default_timer()
-    objective_value = solve_single(c)
+    print("c = ", c)
+    # objective_value = jit(solve_single(c))
+    objective_value = jit_solve_single(c)
     print("1st single run time = ", timeit.default_timer() - start_time)
 
-    # # Expected optimal objective value
+    # Expected optimal objective value
     expected_obj = 6.765209043e03
     assert pytest.approx(objective_value, rel=1e-2) == expected_obj
 
     start_time = timeit.default_timer()
-    objective_value = solve_single(c)
+    print("c = ", c)
+    objective_value = jit_solve_single(c)
     print("2nd single run time = ", timeit.default_timer() - start_time)
     assert pytest.approx(objective_value, rel=1e-2) == expected_obj
 
     batch_size = 100
     batch_c = jnp.tile(c, (batch_size, 1))
-    batch_optimize = vmap(solve_single)
+    batch_optimize = vmap(jit(solve_single))
 
     start_time = timeit.default_timer()
     batch_result = batch_optimize(batch_c)
